@@ -3,18 +3,18 @@ set -e
 
 # create directories
 mkdir -p \
-    /config/{log,data/plugins/configurations,data/transcodes,cache} \
+    /config/log \
+    /config/data/plugins/configurations \
+    /config/data/transcodes \
+    /config/cache \
     /data \
     /transcode
 
 # permissions
-chown jellyfin:jellyfin \
+chown -R jellyfin:jellyfin \
     /config \
-    /config/* \
-    /config/data/plugins \
-    /config/data/plugins/configurations \
-    /config/data/transcodes \
     /transcode
+chmod -R 777 /config
 
 # first arg is `--some-option`
 if [ "${1#-}" != "$1" ]; then

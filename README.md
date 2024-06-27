@@ -1,10 +1,10 @@
 # clion/jellyfin
 Jellyfin is a Free Software Media System that puts you in control of managing and streaming your media. It is an alternative to the proprietary Emby and Plex, to provide media from a dedicated server to end-user devices via multiple apps. Jellyfin is descended from Emby's 3.5.2 release and ported to the .NET Core framework to enable full cross-platform support. There are no strings attached, no premium licenses or features, and no hidden agendas: just a team who want to build something better and work together to achieve it.
 
-This clion/jellyfin docker image supply you a better choice for the jellyfin container than offical image. It is builded base on latest alpine, with smaller size and fix the ffmpg decode, hardware drivers and chinese shown in garbled problems et,al.
+This clion/jellyfin docker image supply you a better choice for the jellyfin container than offical image. It is builded base on latest alpine, with smaller size and fix the ffmpg decode, hardware drivers and chinese shown in garbled problems et,al. This image will auto check and update when there is new version of jellyfin exist.
 
 ## Application Setup
-* Webui can be found at http://<your-ip>:8096
+* Webui can be found at http://\<your-ip\>:8096
 * More information can be found on the official documentation.
 
 ## Hardware Acceleration
@@ -33,7 +33,7 @@ docker run -d \
   -p 7359:7359/udp `#optional` \
   -p 1900:1900/udp `#optional` \
   -v /path/to/config:/config \
-  -v /path/to/video:/video \
+  -v /path/to/media:/media \
   --restart unless-stopped \
   registry.cn-chengdu.aliyuncs.com/clion/jellyfin
 ```
@@ -49,7 +49,7 @@ Containers are configured using parameters passed at runtime (such as those abov
 * ```-e TZ=Asia/Shanghai``` specify a timezone to use in your local area.
 * ```-e JELLYFIN_PublishedServerUrl=192.168.0.5``` Set the autodiscovery response domain or IP address.
 * ```-v /config``` Jellyfin data storage location. This can grow very large, 50gb+ is likely for a large collection.
-* ```-v /video``` Media goes here. Add as many as needed e.g. /video/movies, /video/tv, etc.
+* ```-v /media``` Media goes here. Add as many as needed e.g. /media/movies, /media/tv, etc.
 
 ## Umask for running applications
 For all of my images I provide the ability to override the default umask settings for services started within the containers using the optional -e UMASK=022 setting. Keep in mind umask is not chmod it subtracts from permissions based on it's value it does not add.
