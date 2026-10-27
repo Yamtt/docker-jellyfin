@@ -1,20 +1,55 @@
 #!/bin/sh
 set -e
 
-# create directories
+# 默认值，可以按需修改
+DEFAULT_PUID=1000
+DEFAULT_PGID=1000
+
+# 从环境变量读取，如果未设置则使用默认值
+PUID=${PUID:-$DEFAULT_PUID}
+PGID=${PGID:-$DEFAULT_PGID}
+
+echo "Starting with PUID=$PUID, PGID=$PGID"
+
+# 如果设置了 UMASK 环境变量，就应用它
+if [ -n "$UMASK" ]; then
+    umask "$UMASK"
+fi
+
+# 创建必要的目录（包括转码临时目录）
 mkdir -p \
-    /config/{log,data/plugins/configurations,data/transcodes,cache} \
+    /config/log \
+    /config/data/plugins/configurations \
+    /config/data/transcodes \
+    /config/cache \
     /data \
     /transcode
 
-# permissions
-chown jellyfin:jellyfin \
+# 修改用户的主组：如果 PGID 对应的组不存在，则修改；如果存在，将用户加入该组
+if ! $(getent group "$PGID" >/dev/null) ; then
+    echo "Changing jellyfin group GID from $(getent group jellyfin | cut -d: -f3) to $PGID"
+    groupmod -g "$PGID" jellyfin
+else
+    # 如果组已存在，将用户的主组改为该组
+    existing_group=$(getent group "$PGID" | cut -d: -f1)
+    usermod -g "$existing_group" jellyfin
+fi
+
+# 调整 jellyfin 用户的 UID
+if [ "$(id -u jellyfin)" != "$PUID" ]; then
+    echo "Changing jellyfin user UID from $(id -u jellyfin) to $PUID"
+    usermod -u "$PUID" -g "$PGID" jellyfin
+fi
+
+# 关键目录递归修改所有者
+chown -R "$PUID:$PGID" \
     /config \
-    /config/* \
-    /config/data/plugins \
-    /config/data/plugins/configurations \
-    /config/data/transcodes \
     /transcode
+
+# 目录权限：755 或 750 足够，配置文件不应全局可写
+chmod -R 755 /config
+# 但转码目录需要写权限，单独设置
+chmod 775 /config/data/transcodes
 
 # first arg is `--some-option`
 if [ "${1#-}" != "$1" ]; then

@@ -1,40 +1,276 @@
-# syntax=docker/dockerfile:1
-FROM alpine
+# syntax=docker/dockerfile:1.4
 
-# set version label
-LABEL maintainer="Clion Nieh <76857061@qq.com>"
+# Docker build arguments
+ARG DOTNET_VERSION=10.0
+ARG NODEJS_VERSION=24
 
-# install packages
-RUN set -eux; \
-  #install build packages
-  apk add --no-cache \
-  ffmpeg \
-  su-exec \
-  jellyfin \
-  jellyfin-web \
-  mesa-va-gallium \
-  font-noto-cjk-extra; \
+# build jellyfin server
+FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION}-alpine-amd64 AS server
 
-  # set jellyfin process user and group
-  chown jellyfin:jellyfin /usr/bin/jellyfin; \
-  \
-  # Make dir for config and data
-  mkdir -p /config; \
-  chown jellyfin:jellyfin /config
+ARG JELLYFIN_VERSION
+ARG DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+WORKDIR /tmp/jellyfin
+
+ADD https://github.com/jellyfin/jellyfin/archive/refs/tags/v$JELLYFIN_VERSION.tar.gz ../jellyfin.tar.gz
+
+RUN --mount=type=cache,target=/tmp/nuget \
+    set -ex; \
+    tar xf ../jellyfin.tar.gz --strip-components=1; \
+    \
+    # NuGet 的 SkiaSharp/HarfBuzzSharp NativeAssets 自带 linux-musl-x64 native，
+    # publish 按 RID 自动选用，无需 Alpine skiasharp 包和补丁
+    mkdir -p /tmp/nuget && export NUGET_PACKAGES=/tmp/nuget; \
+    dotnet publish \
+        Jellyfin.Server \
+        --self-contained \
+        --configuration Release \
+        --runtime linux-musl-x64 \
+        --output=/server/usr/lib/jellyfin \
+        "-p:DebugSymbols=false" \
+        "-p:DebugType=none" \
+    ; \
+    \
+    rm -rf \
+        /var/tmp/* \
+        /tmp/*[!nuget] \
+        ~/.nuget \
+        ../*[!nuget] \
+    ;
+
+# build jellyfin-web client
+FROM node:${NODEJS_VERSION}-alpine AS web
+
+ARG JELLYFIN_VERSION
+
+ENV JELLYFIN_VERSION=${JELLYFIN_VERSION}
+
+WORKDIR /tmp/jellyfin-web
+
+ADD https://github.com/jellyfin/jellyfin-web/archive/refs/tags/v$JELLYFIN_VERSION.tar.gz ../jellyfin-web.tar.gz
+
+RUN --mount=type=cache,target=/var/cache/apk \
+    --mount=type=cache,target=/root/.npm \
+    set -ex; \
+    apk add --no-cache --virtual .build-deps \
+      alpine-sdk \
+      autoconf \
+      libpng-dev \
+      gifsicle \
+      automake \
+      git \
+      libtool \
+      musl-dev \
+      nasm \
+      python3 \
+    ; \
+    tar xf ../jellyfin-web.tar.gz --strip-components=1; \
+    npm ci --no-audit --unsafe-perm; \
+    npm run build:production; \
+    mkdir -p /web/usr/share/jellyfin-web; \
+    mv dist/* /web/usr/share/jellyfin-web/; \
+    apk del --no-network .build-deps; \
+    rm -rf \
+        /var/tmp/* \
+        ../* \
+    ;
+
+# build jellyfin-ffmpeg
+FROM alpine AS ffmpeg
+
+ARG FFMPEG_VERSION
+ARG FFMPEG=/ffmpeg
+
+WORKDIR /tmp/jellyfin-ffmpeg
+
+ADD https://github.com/jellyfin/jellyfin-ffmpeg/archive/refs/tags/v$FFMPEG_VERSION.tar.gz ../jellyfin-ffmpeg.tar.gz
+
+COPY --chmod=755 deplib/ ../
+COPY --chmod=755 patches/ffmpeg/ ../patches/
+
+RUN --mount=type=cache,target=/var/cache/apk \
+    set -ex; \
+    apk add --no-cache --virtual .build-deps \
+        alpine-sdk \
+        alsa-lib-dev \
+        bzip2-dev \
+        coreutils \
+        cunit-dev \
+        dav1d-dev \
+        fdk-aac-dev \
+        ffmpeg-libs \
+        ffmpeg-dev \
+        fontconfig-dev \
+        freetype-dev \
+        fribidi-dev \
+        gmp-dev \
+        imlib2-dev \
+        intel-media-driver-dev \
+        libvpl-dev \
+        libass-dev \
+        libbluray-dev \
+        libdrm-dev \
+        libogg-dev \
+        libplacebo-dev \
+        libpng-dev \
+        libsrt-dev \
+        libtool \
+        libva-dev \
+        libva-intel-driver \
+        libvpx-dev \
+        libwebp-dev \
+        libxml2-dev \
+        mesa-dev \
+        musl-dev \
+        nasm \
+        openssl-dev \
+        opus-dev \
+        patch \
+        perl-dev \
+        shaderc-dev \
+        util-linux-dev \
+        vulkan-loader-dev \
+        vulkan-headers \
+        vulkan-tools \
+        x264-dev \
+        x265-dev \
+        xz-dev \
+        zimg-dev \
+        zlib-dev \
+    ; \
+    tar xf ../jellyfin-ffmpeg.tar.gz --strip-components=1; \
+    # 应用 Debian 补丁
+    if [ -d debian/patches ]; then \
+      for i in debian/patches/*.patch; do \
+        [ -f "$i" ] || continue; \
+        echo "Applying Debian patch: $i"; \
+        patch -p1 < "$i" ||  { echo "ERROR: Debian patch $i failed，continue."; } \
+      done; \
+    fi; \
+    # # 应用自定义补丁
+    set -- ../patches/*.patch; \
+    # 如果没有匹配，$1 会等于原始模式字符串
+    if [ "$1" = "../patches/*.patch" ]; then \
+      echo "No patch files found, skipping patches."; \
+    else \
+      for patch in "$@"; do \
+        echo "Applying patch: $patch"; \
+        patch -p1 < "$patch" || { echo "ERROR: Patch $patch failed, continue"; } \
+      done; \
+    fi; \
+    ./configure \
+      --prefix=$FFMPEG/usr \
+      --target-os=linux \
+      --extra-version=Jellyfin \
+      --disable-debug \
+      --disable-doc \
+      --disable-ffplay \
+      --disable-librtmp \
+      --disable-libxcb \
+      --disable-sdl2 \
+      --disable-shared \
+      --disable-xlib \
+      --enable-lto=auto \
+      --enable-avfilter \
+      --enable-fontconfig \
+      --enable-gmp \
+      --enable-gpl \
+      --enable-libass \
+      --enable-libbluray \
+      --enable-libdav1d \
+      --enable-libdrm \
+      --enable-libfdk-aac \
+      --enable-libfreetype \
+      --enable-libfribidi \
+      --enable-libvpl \
+      --enable-libopus \
+      --enable-libplacebo \
+      --enable-libshaderc \
+      --enable-libsrt \
+      --enable-libvpx \
+      --enable-libwebp \
+      --enable-libx264 \
+      --enable-libx265 \
+      --enable-libxml2 \
+      --enable-libzimg \
+      --enable-nonfree \
+      --disable-opencl \
+      --enable-openssl \
+      --enable-pic \
+      --enable-pthreads \
+      --enable-static \
+      --enable-vaapi \
+      --enable-version3 \
+      --enable-vulkan \
+    ; \
+    make -j $(nproc) install $FFMPEG/usr; \
+    # strip binaries to reduce image size
+    strip --strip-unneeded $FFMPEG/usr/bin/ffmpeg $FFMPEG/usr/bin/ffprobe; \
+    \
+    # build ffmpeg lib files
+    ../cplibfiles.sh $FFMPEG/ $FFMPEG/usr/bin/ffmpeg $FFMPEG/usr/bin/ffprobe; \
+    # 删除构建依赖和缓存
+    apk del --no-network .build-deps; \
+    rm -rf \
+        /var/tmp/* \
+        ../* \
+    ;
+
+# Build the final combined image
+FROM clion007/alpine
+
+LABEL mantainer="Clion Nihe Email: clion007@126.com"
+
+# Default environment variables for the Jellyfin invocation
+ENV JELLYFIN_LOG_DIR=/config/log \
+    JELLYFIN_DATA_DIR=/config/data \
+    JELLYFIN_CACHE_DIR=/config/cache \
+    JELLYFIN_CONFIG_DIR=/config/config \
+    JELLYFIN_WEB_DIR=/usr/share/jellyfin-web
+ENV XDG_CACHE_HOME=${JELLYFIN_CACHE_DIR}
+
+# https://github.com/dlemstra/Magick.NET/issues/707#issuecomment-785351620
+ENV MALLOC_TRIM_THRESHOLD_=131072
+
+# add jellyfin files
+COPY --from=server /server /
+COPY --from=web /web /
+COPY --from=ffmpeg /ffmpeg /
 
 # add local files
 COPY --chmod=755 root/ /
 
-# set entrypoint
-ENTRYPOINT ["/init"]
+# install packages
+RUN set -ex; \
+  apk add --no-cache \
+    shadow \
+    su-exec \
+    icu-libs \
+    libva-intel-driver \
+    intel-media-driver \
+    onevpl-intel-gpu \
+    font-droid-nonlatin \
+  ; \
+  find /usr/share/fonts/droid-nonlatin/ -type f -not -name 'DroidSansFallbackFull.ttf' -delete; \
+  \
+  # set jellyfin process user and group
+  groupadd -g 1000 jellyfin; \
+  useradd -u 1000 -s /bin/nologin -M -g 1000 jellyfin; \
+  ln -s /usr/lib/jellyfin/jellyfin /usr/bin/jellyfin; \
+  chown jellyfin:jellyfin /usr/bin/jellyfin; \
+  \
+  # make dir for config and data
+  mkdir -p /config; \
+  chown jellyfin:jellyfin /config; \
+  \
+  rm -rf \
+      /var/cache/apk/* \
+      /var/tmp/* \
+      /tmp/* \
+  ;
+  
+# ports
+EXPOSE 8096 8920 7359/udp 1900/udp
 
-# ports and volumes
-EXPOSE 8096 8920
-VOLUME /config
-
-CMD ["--ffmpeg=/usr/bin/ffmpeg", \
-"--configdir=/config", \
-"--logdir=/config/log", \
-"--datadir=/config/data", \
-"--cachedir=/config/cache", \
-"--webdir=/usr/lib/jellyfin/jellyfin-web"]
+# entrypoint set in clion007/alpine base image
+CMD ["--ffmpeg=/usr/bin/ffmpeg"]
